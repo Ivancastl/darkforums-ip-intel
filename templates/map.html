@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>IP Intelligence Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/map.css') }}"/>
+</head>
+<body>
+
+<header id="top-bar">
+  <div id="logo">
+    <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+    <span id="app-title">&#x2B21; IP INTELLIGENCE</span>
+  </div>
+  <div id="stats-bar">
+    <span class="stat-pill">TOTAL <b id="stat-total">&#8212;</b></span>
+    <span class="stat-pill">IPs UNICAS <b id="stat-unique">&#8212;</b></span>
+    <span class="stat-pill">EN MAPA <b id="stat-visible">0</b></span>
+  </div>
+  <div id="controls">
+    <div id="search-wrap">
+      <input id="search-input" type="text" placeholder="Buscar username..." autocomplete="off"/>
+      <div id="search-dropdown"></div>
+    </div>
+    <div id="active-user-badge">
+      <span class="badge-dot"></span>
+      <span id="active-user-label"></span>
+      <button id="clear-user-btn" onclick="clearUserFilter()" title="Ver todos">x</button>
+    </div>
+    <select id="country-select"><option value="">Todos los paises</option></select>
+    <button id="btn-load" onclick="loadPoints()">Recargar todo</button>
+  </div>
+</header>
+
+<div id="map"></div>
+
+<div id="side-panel" class="panel-hidden">
+  <button id="panel-close" onclick="closePanel()">&#x2715;</button>
+  <div id="panel-content">
+    <div class="panel-loader">Consultando ipinfo.io...</div>
+  </div>
+</div>
+
+<div id="loading-overlay">
+  <div class="loader-box">
+    <div class="spinner"></div>
+    <p id="loading-text">Cargando inteligencia...</p>
+  </div>
+</div>
+
+<script>
+// ── MAP ──────────────────────────────────────────────────────────────────────
+const map = L.map("map", { center:[20,0], zoom:2, preferCanvas:true });
+L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",{
+  attribution:'&copy; CARTO | GeoLite2 MaxMind', subdomains:"abcd", maxZoom:19
+}).addTo(map);
+
+const markers = L.markerClusterGroup({
+  chunkedLoading:true, maxClusterRadius:50,
+  iconCreateFunction: cluster => {
+    const n = cluster.getChildCount();
+    const s = n>1000?"xl":n>100?"lg":n>10?"md":"sm";
+    return L.divIcon({ html:`<div class="cluster-icon cluster-${s}"><span>${fmt(n)}</span></div>`, className:"", iconSize:null });
+  }
+});
+map.addLayer(markers);
+
+// ── HELPERS ──────────────────────────────────────────────────────────────────
+const fmt = n => n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(1)+"k":String(n);
+
+function setLoading(on, msg="Cargando..."){
+  document.getElementById("loading-overlay").style.display = on?"flex":"none";
+  document.getElementById("loading-text").textContent = msg;
+}
+
+function mkIcon(username, hl=false){
+  const l = (username||"?")[0].toUpperCase();
+  return L.divIcon({
+    html:`<div class="ip-pin${hl?" ip-pin--hl":""}"><span>${l}</span></div>`,
+    className:"", iconSize:[28,28], iconAnchor:[14,14]
+  });
+}
+
+function renderPoints(pointsData, hl=false){
+  markers.clearLayers();
+  const layers=[];
+  pointsData.forEach(g=>{
+    g.entries.forEach(e=>{
+      const m = L.marker([e.lat,e.lon],{icon:mkIcon(e.username,hl)});
+      m.on("click",()=>openPanel(e.ip,e.username,g.country));
+      layers.push(m);
+    });
+  });
+  markers.addLayers(layers);
+  document.getElementById("stat-visible").textContent = fmt(layers.length);
+  if(layers.length) map.fitBounds(markers.getBounds(),{padding:[40,40],maxZoom:8});
+}
+
+// ── STATS / COUNTRIES ────────────────────────────────────────────────────────
+async function loadStats(){
+  const d = await fetch("/api/stats").then(r=>r.json());
+  document.getElementById("stat-total").textContent  = fmt(d.total);
+  document.getElementById("stat-unique").textContent = fmt(d.unique_ips);
+}
+
+async function loadCountries(){
+  const list = await fetch("/api/countries").then(r=>r.json());
+  const sel  = document.getElementById("country-select");
+  list.forEach(c=>{
+    const o=document.createElement("option");
+    o.value=c.iso; o.textContent=`${c.name} (${fmt(c.count)})`;
+    sel.appendChild(o);
+  });
+}
+
+// ── LOAD ALL ─────────────────────────────────────────────────────────────────
+async function loadPoints(){
+  clearUserBadge();
+  const country = document.getElementById("country-select").value;
+  setLoading(true,"Geolocalizando IPs...");
+  try{
+    const d = await fetch(`/api/ips?limit=10000${country?"&country="+country:""}`).then(r=>r.json());
+    renderPoints(d.points,false);
+  }catch(e){alert("Error: "+e.message);}
+  setLoading(false);
+}
+
+// ── SEARCH DROPDOWN ──────────────────────────────────────────────────────────
+let _timer=null;
+const si = document.getElementById("search-input");
+const sd = document.getElementById("search-dropdown");
+
+si.addEventListener("input",()=>{
+  clearTimeout(_timer);
+  const q=si.value.trim();
+  if(!q){hideDD();return;}
+  _timer=setTimeout(()=>fetchSugg(q),280);
+});
+
+si.addEventListener("keydown",e=>{
+  if(e.key==="Escape"){hideDD();si.blur();}
+  if(e.key==="Enter"){
+    const f=sd.querySelector(".si.focused")||sd.querySelector(".si");
+    if(f) f.click();
+  }
+  if(e.key==="ArrowDown"||e.key==="ArrowUp"){
+    e.preventDefault();
+    const items=[...sd.querySelectorAll(".si")];
+    if(!items.length)return;
+    const cur=sd.querySelector(".si.focused");
+    let idx=items.indexOf(cur);
+    if(cur)cur.classList.remove("focused");
+    idx=e.key==="ArrowDown"?(idx+1)%items.length:(idx-1+items.length)%items.length;
+    items[idx].classList.add("focused");
+  }
+});
+
+document.addEventListener("click",e=>{
+  if(!document.getElementById("search-wrap").contains(e.target))hideDD();
+});
+
+async function fetchSugg(q){
+  const list = await fetch(`/api/search-users?q=${encodeURIComponent(q)}`).then(r=>r.json());
+  if(!list.length){
+    sd.innerHTML=`<div class="sug-empty">Sin resultados</div>`;
+    sd.classList.add("open"); return;
+  }
+  const re=new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")})`, "gi");
+  sd.innerHTML=list.map(u=>`
+    <div class="si" data-u="${u.username}" onclick="selectUser(this.dataset.u)">
+      <div class="si-name">${u.username.replace(re,`<mark>$1</mark>`)}</div>
+      <div class="si-meta">
+        <span class="tag-ip">${fmt(u.ip_count)} IP${u.ip_count!==1?"s":""}</span>
+        <span class="tag-rec">${fmt(u.total)} reg.</span>
+      </div>
+    </div>`).join("");
+  sd.classList.add("open");
+}
+
+function hideDD(){ sd.classList.remove("open"); sd.innerHTML=""; }
+
+// ── SELECT USER → filtrar mapa ───────────────────────────────────────────────
+async function selectUser(username){
+  hideDD();
+  si.value=username;
+  setLoading(true,`Cargando IPs de ${username}...`);
+  try{
+    const d = await fetch(`/api/user-ips/${encodeURIComponent(username)}`).then(r=>r.json());
+    const total = d.points.reduce((a,g)=>a+g.entries.length,0);
+    renderPoints(d.points,true);
+    setActiveBadge(username,total);
+  }catch(e){alert("Error: "+e.message);}
+  setLoading(false);
+}
+
+function clearUserFilter(){ si.value=""; clearUserBadge(); loadPoints(); }
+function setActiveBadge(u,n){
+  document.getElementById("active-user-label").textContent=`${u}  \u00b7  ${fmt(n)} IPs`;
+  document.getElementById("active-user-badge").classList.add("vis");
+}
+function clearUserBadge(){ document.getElementById("active-user-badge").classList.remove("vis"); }
+
+// ── IP DETAIL PANEL ──────────────────────────────────────────────────────────
+async function openPanel(ip, username, country){
+  const panel=document.getElementById("side-panel");
+  const content=document.getElementById("panel-content");
+  panel.classList.remove("panel-hidden");
+  content.innerHTML=`<div class="panel-loader"><div class="spinner sm"></div> Consultando ipinfo.io...</div>`;
+  try{
+    const d   = await fetch(`/api/ip-detail/${ip}`).then(r=>r.json());
+    const flag= d.country?`https://flagcdn.com/24x18/${d.country.toLowerCase()}.png`:"";
+    const loc = d.loc?d.loc.split(","):[null,null];
+    const users=(d.db_users||[]).map(u=>`
+      <div class="db-user">
+        <span>&#x1F464;</span>
+        <b>${u.username}</b>
+        ${u.hostname?`<small>${u.hostname}</small>`:""}
+        <button class="btn-umap" onclick="selectUser('${u.username.replace(/'/g,"\\'")}')">&#x1F5FA; Ver IPs</button>
+      </div>`).join("");
+
+    content.innerHTML=`
+      <div class="panel-header">
+        ${flag?`<img src="${flag}" class="flag"/>`:""}
+        <div>
+          <div class="panel-ip">${ip}</div>
+          <div class="panel-country">${d.country_name||d.country||country}</div>
+        </div>
+      </div>
+      <div class="panel-section">
+        <div class="info-row"><span class="lbl">&#x1F3D9; Ciudad</span><span>${d.city||"&mdash;"}</span></div>
+        <div class="info-row"><span class="lbl">&#x1F4CD; Region</span><span>${d.region||"&mdash;"}</span></div>
+        <div class="info-row"><span class="lbl">&#x1F3E2; Org/ISP</span><span>${d.org||"&mdash;"}</span></div>
+        <div class="info-row"><span class="lbl">&#x1F550; Timezone</span><span>${d.timezone||"&mdash;"}</span></div>
+        <div class="info-row"><span class="lbl">&#x1F4E1; Hostname</span><span>${d.hostname||"&mdash;"}</span></div>
+        <div class="info-row"><span class="lbl">&#x1F4CC; Coords</span><span>${d.loc||"&mdash;"}</span></div>
+      </div>
+      <div class="panel-section">
+        <div class="section-title">Usuarios en DB</div>
+        ${users||"<div class='db-user muted'>Sin resultados</div>"}
+      </div>
+      ${loc[0]?`
+      <div class="panel-section">
+        <div class="section-title">Ubicacion exacta</div>
+        <div id="mini-map"></div>
+      </div>`:""}
+      <div class="panel-footer">
+        <a href="https://ipinfo.io/${ip}" target="_blank">Ver completo en ipinfo.io &#x2197;</a>
+      </div>`;
+
+    if(loc[0]){
+      setTimeout(()=>{
+        const mm=L.map("mini-map",{zoomControl:false,attributionControl:false});
+        L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",{subdomains:"abcd"}).addTo(mm);
+        const ll=[parseFloat(loc[0]),parseFloat(loc[1])];
+        mm.setView(ll,8);
+        L.circleMarker(ll,{radius:8,color:"#00ffe0",fillColor:"#00ffe0",fillOpacity:.9}).addTo(mm);
+      },120);
+    }
+  }catch(e){
+    content.innerHTML=`<div class="panel-loader error">Error: ${e.message}</div>`;
+  }
+}
+
+function closePanel(){ document.getElementById("side-panel").classList.add("panel-hidden"); }
+
+document.getElementById("country-select").addEventListener("change",loadPoints);
+
+// ── INIT ─────────────────────────────────────────────────────────────────────
+(async()=>{
+  setLoading(true,"Iniciando sistema...");
+  await loadStats();
+  await loadCountries();
+  await loadPoints();
+})();
+</script>
+</body>
+</html>
