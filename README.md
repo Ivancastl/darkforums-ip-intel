@@ -44,7 +44,7 @@ pip install -r requirements.txt
 
 ### 3. Token gratuito de ipinfo.io
 
-1. Regístrate en[https://ipinfo.io/signup
+1. Regístrate en https://ipinfo.io/signup
 2. Copia tu token desde https://ipinfo.io/account/token
 3. El plan gratuito incluye **50,000 consultas/mes**
 
