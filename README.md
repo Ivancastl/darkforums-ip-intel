@@ -77,7 +77,7 @@ Abre: **http://127.0.0.1:5000**
 
 ## 🔒 Privacidad
 
-`ips.db` y `GeoLite2-Country.mmdb` están en `.gitignore`. Nunca compartas tu base de datos ni tu token públicamente.
+Nunca compartas tu token públicamente.
 
 ---
 
